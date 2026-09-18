@@ -196,7 +196,3 @@ def predict_cluster(data: ClusterInput):
 
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Clustering error: {str(e)}")
-
-# Fixed target module string to match 'app1:app'
-if __name__ == "__main__":
-    uvicorn.run("app1:app", host="127.0.0.1", port=8000, reload=True)
