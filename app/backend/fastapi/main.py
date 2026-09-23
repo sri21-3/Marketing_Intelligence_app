@@ -14,22 +14,21 @@ app = FastAPI(
 )
 
 # ------------------------------------------------------------------
-# Paths Setup (Relative & Dynamic for Local & GitHub Deployments)
+# Paths Setup (Reliable Static Resolution)
 # ------------------------------------------------------------------
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Project root: Go 3 levels up from app/backend/fastapi/
-PROJECT_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, "../../../"))
+# Go 3 levels up from app/backend/fastapi/ to reach project root
+PROJECT_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, "..", "..", ".."))
 
-# Resolution for pickles directory
-PICKLE_DIR = os.path.join(PROJECT_ROOT, "app", "pickles")
+# Resolve Pickles Directory (Checks PROJECT_ROOT/pickles first, then PROJECT_ROOT/app/pickles)
+PICKLE_DIR = os.path.join(PROJECT_ROOT, "pickles")
 if not os.path.exists(PICKLE_DIR):
-    PICKLE_DIR = os.path.join(PROJECT_ROOT, "pickles")
+    PICKLE_DIR = os.path.join(PROJECT_ROOT, "app", "pickles")
 
-# Resolution for data directory
+# Resolve Data Directory (Checks PROJECT_ROOT/data/processed first, then PROJECT_ROOT/app/data/processed)
 DATA_DIR = os.path.join(PROJECT_ROOT, "data", "processed")
 if not os.path.exists(DATA_DIR):
-    # Fallback in case 'data' folder is inside 'app'
     DATA_DIR = os.path.join(PROJECT_ROOT, "app", "data", "processed")
 
 DIVERGENCE_CSV_PATH = os.path.join(DATA_DIR, "Demand_ot_hype_Divergence_score_features.csv")
@@ -46,22 +45,37 @@ LGB_FORECAST_MODEL_PATH = os.path.join(PICKLE_DIR, "lightgbm_search_Intrest_fore
 LGB_FORECAST_META_PATH = os.path.join(PICKLE_DIR, "lightgbm_search_Intrest_forecast_model_metadata.pkl")
 
 # ------------------------------------------------------------------
-# Load Artifacts & Processed CSV Data
+# Load Artifacts & Processed CSV Data (Isolated Blocks)
 # ------------------------------------------------------------------
+# 1. XGBoost Regression Artifacts
 try:
     xgb_model = joblib.load(XGB_MODEL_PATH)
     onehot_encoder = joblib.load(OHE_ENCODER_PATH)
     reg_scaler = joblib.load(REG_SCALER_PATH)
+    print("✅ Regression artifacts loaded successfully.")
+except Exception as e:
+    print(f"❌ Error loading Regression artifacts: {e}")
+    xgb_model = onehot_encoder = reg_scaler = None
+
+# 2. KMeans Clustering Artifacts
+try:
     kmeans_model = joblib.load(KMEANS_MODEL_PATH)
     kmeans_scaler = joblib.load(KMEANS_SCALER_PATH)
+    print("✅ Clustering artifacts loaded successfully.")
+except Exception as e:
+    print(f"❌ Error loading Clustering artifacts: {e}")
+    kmeans_model = kmeans_scaler = None
+
+# 3. LightGBM Forecasting Artifacts
+try:
     lgb_forecast_model = joblib.load(LGB_FORECAST_MODEL_PATH)
     lgb_forecast_metadata = joblib.load(LGB_FORECAST_META_PATH)
-    print(f"✅ All ML & Forecasting artifacts successfully loaded from: {PICKLE_DIR}")
+    print("✅ Forecasting artifacts loaded successfully.")
 except Exception as e:
-    print(f"❌ Error loading pickle files from {PICKLE_DIR}: {e}")
-    xgb_model = onehot_encoder = reg_scaler = kmeans_model = kmeans_scaler = None
+    print(f"❌ Error loading Forecasting artifacts: {e}")
     lgb_forecast_model = lgb_forecast_metadata = None
 
+# 4. Feature Datasets
 try:
     df_divergence = pd.read_csv(DIVERGENCE_CSV_PATH)
     df_cluster = pd.read_csv(CLUSTER_CSV_PATH)
@@ -121,7 +135,6 @@ def predict_divergence(data: BasicMarketInput):
         raise HTTPException(status_code=500, detail="Divergence dataset is not loaded.")
 
     try:
-        # Lookup features based on Country_Name and Category
         matching_rows = df_divergence[
             (df_divergence["Country_Name"] == data.Country_Name) & 
             (df_divergence["Category"] == data.Category)
@@ -133,7 +146,6 @@ def predict_divergence(data: BasicMarketInput):
                 detail=f"No matching data found for Country '{data.Country_Name}' and Category '{data.Category}'."
             )
 
-        # Select the latest record if multiple matches exist
         raw_df = matching_rows.iloc[[-1]].copy()
 
         cols_to_scale = [
@@ -254,7 +266,6 @@ def forecast_search_interest(data: ForecastInput):
                 detail=f"No historical data found for Country '{data.Country_Name}' and Category '{data.Category}'."
             )
 
-        # Parse date column and sort chronologically
         date_col = 'Week_Start' if 'Week_Start' in matching_rows.columns else 'Date'
         matching_rows[date_col] = pd.to_datetime(matching_rows[date_col])
         series_df = matching_rows.sort_values(date_col).reset_index(drop=True)
@@ -265,7 +276,6 @@ def forecast_search_interest(data: ForecastInput):
                 detail=f"Found only {len(series_df)} records for this combination. At least 4 historical points are required."
             )
 
-        # Take the most recent records
         history_dates = list(series_df[date_col])
         history_values = list(series_df['Search_Interest'])
         
@@ -273,7 +283,6 @@ def forecast_search_interest(data: ForecastInput):
         forecast_values = []
         last_date = history_dates[-1]
 
-        # Iterative / Recursive Multi-Step Forecasting
         for w in range(1, data.Forecast_Horizon_Weeks + 1):
             next_date = last_date + pd.Timedelta(weeks=w)
             forecast_dates.append(next_date)
@@ -292,14 +301,12 @@ def forecast_search_interest(data: ForecastInput):
                 'cos_week': float(np.cos(2 * np.pi * next_date.isocalendar().week / 52))
             }
 
-            # Fill in any additional features expected by LightGBM
             for col in lgb_forecast_metadata['features']:
                 if col not in feat_dict:
                     feat_dict[col] = 0.0
 
             input_df = pd.DataFrame([feat_dict])
 
-            # Apply categorical encoding schemas
             for col in lgb_forecast_metadata.get('categorical_features', []):
                 if col in lgb_forecast_metadata.get('categorical_categories', {}):
                     cats = lgb_forecast_metadata['categorical_categories'][col]
